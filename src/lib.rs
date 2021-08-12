@@ -47,10 +47,10 @@ impl BB {
     }
     #[inline(always)]
     pub fn overlaps(self, other: BB) -> bool {
-        if  self.top_left.x >= other.bottom_right.x ||
-            self.top_left.y >= other.bottom_right.y ||
-            self.bottom_right.x <= other.top_left.x ||
-            self.bottom_right.y <= other.top_left.y {
+        if  self.top_left.x > other.bottom_right.x ||
+            self.top_left.y > other.bottom_right.y ||
+            self.bottom_right.x < other.top_left.x ||
+            self.bottom_right.y < other.top_left.y {
             false
         } else {
             true
@@ -229,6 +229,10 @@ impl<T:TreeNodeItem> QuadBTree<T> {
             return;
         }
 
+        #[cfg(debug_assertions)]
+        if !bb.overlaps(node.bb) {
+            debug_assert!(bb.overlaps(node.bb));
+        }
 
         let off : BB = bb - node.bb.top_left;
         let x1 = (off.top_left.x>>node.sub_cell_shift).clamp(0,7);
@@ -245,6 +249,23 @@ impl<T:TreeNodeItem> QuadBTree<T> {
             child_mask &= !cur_child_mask;
             let child_place = ((cur_child_mask-1)&node.node_bitmap).count_ones();
             let child_node_index = node.node_children[child_place as usize];
+
+
+            #[cfg(debug_assertions)]
+                {
+                    let childnode:&TreeNode<T> = &self.tree[child_node_index as usize];
+                    debug_assert_eq!(childnode.parent as usize, node_index);
+                    let cur_child_x1 = cur_child%8;
+                    let cur_child_y1 = cur_child/8;
+                    {
+                        debug_assert_eq!(childnode.bb.top_left.x, node.bb.top_left.x + cur_child_x1 as i32*node.sub_cell_size);
+                    }
+                    {
+                        debug_assert_eq!(childnode.bb.top_left.y, node.bb.top_left.y + cur_child_y1 as i32*node.sub_cell_size);
+                    }
+
+                }
+
             self.query_impl(child_node_index as usize, bb, &mut *f);
         }
     }
@@ -308,13 +329,19 @@ impl<T:TreeNodeItem> QuadBTree<T> {
                 let insertion_place = get_set_bits_below(node.node_bitmap, bitmap_index as u64);
                 node.node_bitmap |= 1<<(bitmap_index as usize);
 
-                let top_left = Pos {
+                let top_left = node.bb.top_left + Pos {
                     x: x1<<node.sub_cell_shift,
                     y: y1<<node.sub_cell_shift,
-                };                let bb = BB {
+                };
+                let new_bb = BB {
                     top_left,
                     bottom_right: top_left + Pos{x:node.sub_cell_size-1,y:node.sub_cell_size-1}
                 };
+                {
+                    debug_assert_eq!(new_bb.top_left.x, node.bb.top_left.x + x1*node.sub_cell_size);
+                    debug_assert_eq!(new_bb.top_left.y, node.bb.top_left.y + y1*node.sub_cell_size);
+                }
+
                 let sub_cell_size = node.sub_cell_size/8;
                 let sub_cell_shift = node.sub_cell_shift-3;
                 let new_node;
@@ -325,7 +352,7 @@ impl<T:TreeNodeItem> QuadBTree<T> {
                     debug_assert_eq!(node.node_bitmap.count_ones() as usize, node.node_children.len());
                     new_node = &mut self.tree[free as usize];
                     self.first_free = new_node.next_free;
-                    new_node.bb = bb;
+                    new_node.bb = new_bb;
                     new_node.sub_cell_size = sub_cell_size;
                     new_node.sub_cell_shift = sub_cell_shift;
                     debug_assert_eq!(new_node.node_bitmap,0);
@@ -338,7 +365,7 @@ impl<T:TreeNodeItem> QuadBTree<T> {
                     node.node_children.insert(insertion_place as usize, new_child_node as u32);
                     debug_assert_eq!(node.node_bitmap.count_ones() as usize, node.node_children.len());
                     self.tree.push(TreeNode {
-                        bb,
+                        bb:new_bb,
                         sub_cell_size,
                         sub_cell_shift,
                         node_bitmap: 0,
@@ -416,8 +443,8 @@ mod tests {
             } else {
                 let x1 = rng.gen_range(0..gridsize);
                 let y1 = rng.gen_range(0..gridsize);
-                let x2 = rng.gen_range(x1..(x1+max_size).min(gridsize));
-                let y2 = rng.gen_range(y1..(y1+max_size).min(gridsize));
+                let x2 = rng.gen_range(x1..(x1.saturating_add(max_size)).min(gridsize));
+                let y2 = rng.gen_range(y1..(y1.saturating_add(max_size)).min(gridsize));
                 let test_item = TestItem {
                     id: i,
                     pos: BB::new(x1,y1,x2,y2)
@@ -428,7 +455,7 @@ mod tests {
                 all_inserted.push(test_item);
             }
         }
-        println!("After {} operations, has {} tree nodes.", operations, g.tree.len());
+        //println!("After {} operations, has {} tree nodes.", operations, g.tree.len());
         for _i in 0..10 {
             let x1 = rng.gen_range(0..gridsize);
             let y1 = rng.gen_range(0..gridsize);
@@ -446,7 +473,7 @@ mod tests {
     }
     #[test]
     fn exhaustive_insert_query_single_insert_test() {
-        for seed in 0..100000 {
+        for seed in 0..1000000 {
             //println!("Testing seed {}", seed);
             random_insert_and_query_test(seed,1,false,1024, None);
         }
@@ -481,8 +508,8 @@ mod tests {
         }
     }
     #[test]
-    fn exhaustive_insert_test_seed118() {
-        random_insert_and_query_test(118,10,false,1024, None);
+    fn exhaustive_insert_test_seed() {
+        random_insert_and_query_test(62,1,false,1024, None);
     }
     #[test]
     fn exhaustive_insert_remove_test_seed9() {
@@ -526,11 +553,11 @@ mod tests {
     #[bench]
     fn benchmark_random_queries(b: &mut Bencher) {
         let mut rng = Pcg64::seed_from_u64(42);
-        let gridsize = 8192*64;
-        let max_size = 256;
+        let gridsize = 8192*1024;
+        let max_size = 8;
         //compile_error!("Figure out why this isn't faster!");
         let mut g = QuadBTree::new(gridsize);
-        for i in 0..1_000 {
+        for i in 0..100_000 {
             let x1 = rng.gen_range(0..gridsize);
             let y1 = rng.gen_range(0..gridsize);
             let x2 = rng.gen_range(x1..(x1+max_size).min(gridsize));
@@ -541,7 +568,7 @@ mod tests {
             };
             g.insert(test_item);
         }
-        println!("Tree nodes: {}",g.tree.len());
+        //println!("Tree nodes: {}",g.tree.len());
 
         let mut rng = thread_rng();
         {
