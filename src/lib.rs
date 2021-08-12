@@ -4,12 +4,14 @@
 #![feature(test)]
 
 use std::ops::{Sub, Add};
+use smallvec::smallvec;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::arch::x86_64::{__m128i, _mm_set1_epi8, _mm_cvtsi128_si64x, _mm_and_si128, _mm_set1_epi64x};
 
 #[cfg(all(target_feature = "avx512vl", target_feature="avx512bw"))]
 use std::arch::x86_64::{_mm_broadcastb_epi8, _mm_maskz_broadcastb_epi8};
+use smallvec::SmallVec;
 
 #[derive(Clone,Copy,PartialEq,Debug,Eq,Hash)]
 pub struct Pos {
@@ -96,9 +98,11 @@ pub trait TreeNodeItem {
     type Key : PartialEq+Eq+Hash;
 
     /// Return bounding box for the given item
+    #[inline(always)]
     fn get_bb(&self) -> BB;
 
     /// Return a key identifying a particular item.
+    #[inline(always)]
     fn get_key(&self) -> Self::Key;
 
 }
@@ -110,14 +114,14 @@ fn get_set_bits_below(bitmap:u64, bit_index: u64) -> u32 {
 
 struct TreeNode<T> {
     bb: BB,
-    sub_cell_size: i32,
     sub_cell_shift: u32,
     node_bitmap: u64,
-    node_payload: Vec<T>,
-    node_children: Vec<u32>,
+    node_payload: SmallVec<[T;4]>,
+    node_children: SmallVec<[u32;4]>,
     next_free: Option<u32>, //If TreeNode is part of free-list, this is the next free
     parent: u32, //The root has parent id 0. It doesn't really have a parent of its own, but it has 0 here.
     node_place: u32,
+    sub_cell_size: i32,
 }
 
 pub struct QuadBTree<T:TreeNodeItem> {
@@ -149,8 +153,8 @@ impl<T:TreeNodeItem> QuadBTree<T> {
             sub_cell_size: size/8,
             sub_cell_shift: shift.saturating_sub(3),
             node_bitmap: 0,
-            node_payload: vec![],
-            node_children: vec![],
+            node_payload: smallvec![],
+            node_children: smallvec![],
             next_free: None,
             parent: 0,
             node_place: 0
@@ -225,6 +229,7 @@ impl<T:TreeNodeItem> QuadBTree<T> {
             return;
         }
 
+
         let off : BB = bb - node.bb.top_left;
         let x1 = (off.top_left.x>>node.sub_cell_shift).clamp(0,7);
         let x2 = (off.bottom_right.x>>node.sub_cell_shift).clamp(0,7);
@@ -233,6 +238,7 @@ impl<T:TreeNodeItem> QuadBTree<T> {
 
         let bb_mask = Self::spread_op(x1,y1,x2,y2);
         let mut child_mask:u64 = node.node_bitmap&bb_mask;
+        //compile_error!("Continue optimizing")
         while child_mask!=0 {
             let cur_child = child_mask.trailing_zeros() as u64;
             let cur_child_mask = 1<<cur_child;
@@ -336,8 +342,8 @@ impl<T:TreeNodeItem> QuadBTree<T> {
                         sub_cell_size,
                         sub_cell_shift,
                         node_bitmap: 0,
-                        node_payload: vec![],
-                        node_children: vec![],
+                        node_payload: smallvec![],
+                        node_children: smallvec![],
                         next_free: None,
                         parent: node_index as u32,
                         node_place: bitmap_index as u32
@@ -520,9 +526,9 @@ mod tests {
     #[bench]
     fn benchmark_random_queries(b: &mut Bencher) {
         let mut rng = Pcg64::seed_from_u64(42);
-        let gridsize = 8192;
-        let max_size = 1024;
-        compile_error!("Figure out why this isn't faster!");
+        let gridsize = 8192*64;
+        let max_size = 256;
+        //compile_error!("Figure out why this isn't faster!");
         let mut g = QuadBTree::new(gridsize);
         for i in 0..1_000 {
             let x1 = rng.gen_range(0..gridsize);
