@@ -30,6 +30,32 @@ pub struct BB {
 }
 
 impl BB {
+    /// Return the distance between the two closest points on the two bounding boxes, according to
+    /// a uniform norm/infinity norm. I.e, the number of steps which must be walked if
+    /// one can walk up, down, left, right or diagonally.
+    ///
+    /// The points (1,1) and (3,3) have a distance of 2. As have (1,1) and (1,3).
+    pub fn distance_to(self, other:BB) -> i32 {
+        let x_dist;
+        if self.bottom_right.x < other.top_left.x {
+            x_dist = other.top_left.x - self.bottom_right.x;
+        } else if other.bottom_right.x < self.top_left.x {
+            x_dist = self.top_left.x - other.bottom_right.x;
+        }  else {
+            x_dist = 0;
+        }
+
+        let y_dist;
+        if self.bottom_right.y < other.top_left.y {
+            y_dist = other.top_left.y - self.bottom_right.y;
+        } else if other.bottom_right.y < self.top_left.y {
+            y_dist = self.top_left.y - other.bottom_right.y;
+        }  else {
+            y_dist = 0;
+        }
+
+        x_dist.max(y_dist)
+    }
     /// Create a new bounding box from the given coordinates.
     /// x1,y1 must be the top left corner, and x2,y2 must be the
     /// lower right.
@@ -55,6 +81,14 @@ impl BB {
         } else {
             true
         }
+    }
+
+    /// Returns true if the self BB is entirely contained within the 'other'.
+    pub fn is_contained_in(self, other: BB) -> bool {
+        self.top_left.x >= other.top_left.x &&
+        self.top_left.y >= other.top_left.y &&
+        self.bottom_right.x <= other.bottom_right.x &&
+        self.bottom_right.y <= other.bottom_right.y
     }
 }
 
@@ -104,6 +138,9 @@ pub trait TreeNodeItem {
     /// Return a key identifying a particular item.
     #[inline(always)]
     fn get_key(&self) -> Self::Key;
+
+    /// Must update the bounding box of the object to the given bounding box
+    fn move_item(&mut self, new_bb: BB);
 
 }
 
@@ -217,6 +254,52 @@ impl<T:TreeNodeItem> QuadBTree<T> {
             return x;
         }
     }
+
+    ///
+    pub fn find_all_overlapping_neighbors<'a,F:FnMut(&'a T, &'a T)>(&'a self, mut f: F) {
+        //let presently_relevant = vec![0u64;(self.tree.len()+63)/64];
+        //let mut relevance_bits: Vec::<u64>::new();
+
+        let mut candidate_stack = Vec::with_capacity(16);
+        let mut temps = [vec![],vec![],vec![],vec![],vec![],vec![],vec![],vec![]];
+
+        self.find_all_overlapping_neighbors_impl(0, &mut candidate_stack, &mut f, &mut temps);
+    }
+    fn find_all_overlapping_neighbors_impl<'a,F:FnMut(&'a T, &'a T)>(&'a self, node_index: usize, candidate_stack_ref: &mut Vec<&'a T>, f: &mut F, temps: &mut [Vec<&'a T>]) {
+
+        //let candidate_watermark = candidate_stack.len();
+        let node = &self.tree[node_index];
+
+        let (first,second) = temps.split_at_mut(1);
+        let mut candidate_stack:&mut Vec<_>;
+        candidate_stack = &mut first[0];
+        candidate_stack.clear();
+        candidate_stack.extend(candidate_stack_ref.iter().copied().filter(|x|x.get_bb().overlaps(node.bb)));
+
+
+        let candidate_watermark = candidate_stack.len();
+        candidate_stack.extend(node.node_payload.iter());
+
+        let mut diagskip = 0; //Avoid returning each pair twice as (a,b) and (b,a). Also avoid (a,a) :-)
+        for (outer_index, cand) in candidate_stack.iter().copied().enumerate()
+        {
+            if outer_index >= candidate_watermark {
+                diagskip += 1;
+            }
+
+            for item in node.node_payload.iter().skip(diagskip) {
+                if item.get_bb().overlaps(cand.get_bb()) {
+                    f(item, cand);
+                }
+            }
+
+        }
+        for child in node.node_children.iter().copied() {
+            self.find_all_overlapping_neighbors_impl(child as usize, &mut candidate_stack, f, second);
+        }
+        //candidate_stack.truncate(candidate_watermark );
+    }
+
     fn query_impl<'a,F:FnMut(&'a T)>(&'a self, node_index: usize, bb: BB, f:&mut F) {
         let node = &self.tree[node_index];
         for payload_item in &node.node_payload {
@@ -280,22 +363,58 @@ impl<T:TreeNodeItem> QuadBTree<T> {
         self.query_impl(0,bb,&mut f)
     }
 
-
-    /// Remove the given item.
-    /// Return true if the item was found and removed,
-    /// false otherwise.
-    pub fn remove(&mut self, key: T::Key) -> bool {
-        if let Some(node_index) = self.items.remove(&key) {
+    /// Returns true if an item with the given key was moved to the
+    /// new bounding box location. False if item was not found.
+    pub fn move_item(&mut self, key: T::Key, bb: BB) -> bool {
+        if let Some(node_index) = self.items.get(&key).copied() {
             let node : &mut TreeNode<T> = &mut self.tree[node_index as usize];
-            if let Some(placement_index) = node.node_payload.iter().position(|x|x.get_key()==key) {
-                node.node_payload.swap_remove(placement_index);
-                self.remove_node_if_unused(node_index as usize);
+            if bb.is_contained_in(node.bb) {
+
+                let off : BB = bb - node.bb.top_left;
+                let x1 = (off.top_left.x>>node.sub_cell_shift).clamp(0,7);
+                let x2 = (off.bottom_right.x>>node.sub_cell_shift).clamp(0,7);
+                let y1 = (off.top_left.y>>node.sub_cell_shift).clamp(0,7);
+                let y2 = (off.bottom_right.y>>node.sub_cell_shift).clamp(0,7);
+                if !(node.sub_cell_size >= 8 && x1==x2 && y1==y2) {
+                    //No big expensive op needed.
+                    for item in node.node_payload.iter_mut() {
+                        if item.get_key() == key {
+                            item.move_item(bb);
+                            return true;
+                        }
+                    }
+                    return true;
+                }
+            }
+            // This could be optimized slightly.
+            let item = self.remove(key);
+            if let Some(mut item) = item {
+                item.move_item(bb);
+                self.insert(item);
                 true
             } else {
-                false //We can only get here if some of the user's trait-implementations panic
+                false
             }
         } else {
             false
+        }
+    }
+
+    /// Remove the given item.
+    /// Return the item if it was found and removed,
+    /// None otherwise.
+    pub fn remove(&mut self, key: T::Key) -> Option<T> {
+        if let Some(node_index) = self.items.remove(&key) {
+            let node : &mut TreeNode<T> = &mut self.tree[node_index as usize];
+            if let Some(placement_index) = node.node_payload.iter().position(|x|x.get_key()==key) {
+                let t = node.node_payload.swap_remove(placement_index);
+                self.remove_node_if_unused(node_index as usize);
+                Some(t)
+            } else {
+                None //We can only get here if some of the user's trait-implementations panic
+            }
+        } else {
+            None
         }
 
     }
@@ -315,7 +434,7 @@ impl<T:TreeNodeItem> QuadBTree<T> {
         let y1 = (off.top_left.y>>node.sub_cell_shift).clamp(0,7);
         let y2 = (off.bottom_right.y>>node.sub_cell_shift).clamp(0,7);
 
-        if x1==x2 && y1==y2 && node.sub_cell_size >= 8 {
+        if node.sub_cell_size >= 8 && x1==x2 && y1==y2 {
             let bitmap_index = x1 + (y1<<3);
             if node.node_bitmap & (1<<(bitmap_index as usize)) != 0 {
                 // Child node exists
@@ -406,6 +525,7 @@ mod tests {
     }
 
 
+
     #[derive(Clone,Copy,PartialEq,Debug,Eq,Hash)]
     pub struct TestItem {
         id: u32,
@@ -423,11 +543,15 @@ mod tests {
         fn get_key(&self) -> Self::Key {
             self.id
         }
+
+        fn move_item(&mut self, new_bb: BB) {
+            self.pos = new_bb;
+        }
     }
 
 
 
-    fn random_insert_and_query_test(seed:u64, operations: u32, deletes: bool, gridsize: i32, max_size: Option<i32>) {
+    fn random_insert_and_query_test(seed:u64, operations: u32, deletes_and_moves: bool, gridsize: i32, max_size: Option<i32>) {
 
         let max_size = max_size.unwrap_or(i32::MAX);
         let mut rng = Pcg64::seed_from_u64(seed);
@@ -435,7 +559,18 @@ mod tests {
         let mut g = QuadBTree::new(gridsize);
         let mut all_inserted:Vec<TestItem> = Vec::new();
         for i in 0..operations {
-            if deletes && rng.gen_bool(0.5) && all_inserted.is_empty()==false {
+            if deletes_and_moves && rng.gen_bool(0.33) && all_inserted.is_empty()==false {
+                let to_move_index = rng.gen_range(0..all_inserted.len());
+                let to_move_key = all_inserted[to_move_index].id;
+                let x1 = rng.gen_range(0..gridsize);
+                let y1 = rng.gen_range(0..gridsize);
+                let x2 = rng.gen_range(x1..(x1.saturating_add(max_size)).min(gridsize));
+                let y2 = rng.gen_range(y1..(y1.saturating_add(max_size)).min(gridsize));
+                let pos = BB::new(x1,y1,x2,y2);
+                assert!(g.move_item(to_move_key,pos));
+                all_inserted[to_move_index].pos = pos;
+            }
+            if deletes_and_moves && rng.gen_bool(0.5) && all_inserted.is_empty()==false {
                 let to_remove_index = rng.gen_range(0..all_inserted.len());
                 let to_remove_key = all_inserted[to_remove_index].id;
                 g.remove(to_remove_key);
@@ -549,15 +684,44 @@ mod tests {
         q.remove(42);
         assert_eq!(q.query(BB::new(9,9,16,16)), Vec::<&TestItem>::new());
     }
-
+    #[test]
+    fn basic_find_neighbors_test() {
+        let mut q = QuadBTree::new(256);
+        let test_item1 = TestItem {
+            id: 42,
+            pos: BB::new(10, 10, 15, 15)
+        };
+        let test_item2 = TestItem {
+            id: 43,
+            pos: BB::new(20, 20, 25, 25)
+        };
+        let test_item3 = TestItem {
+            id: 44,
+            pos: BB::new(26, 26, 27, 27)
+        };
+        q.insert(test_item1);
+        q.insert(test_item2);
+        q.insert(test_item3);
+        q.find_all_overlapping_neighbors(|a,b|{
+           println!("Found neighbors: {:?} & {:?}", a.id, b.id);
+        });
+    }
+    #[test]
+    fn bb_test1() {
+        let bb1 = BB::new(20, 20, 25, 25);
+        let bb2 = BB::new(21, 21, 25, 25);
+        assert_eq!(bb1.distance_to(bb2), 0);
+        assert!(bb1.overlaps(bb2));
+    }
     #[bench]
     fn benchmark_random_queries(b: &mut Bencher) {
         let mut rng = Pcg64::seed_from_u64(42);
-        let gridsize = 8192*1024;
-        let max_size = 8;
-        //compile_error!("Figure out why this isn't faster!");
+        let gridsize = 8192;
+        let max_size = 4;
+        let max_query_size = 32;
+
         let mut g = QuadBTree::new(gridsize);
-        for i in 0..100_000 {
+        for i in 0..4_000 {
             let x1 = rng.gen_range(0..gridsize);
             let y1 = rng.gen_range(0..gridsize);
             let x2 = rng.gen_range(x1..(x1+max_size).min(gridsize));
@@ -568,14 +732,14 @@ mod tests {
             };
             g.insert(test_item);
         }
-        //println!("Tree nodes: {}",g.tree.len());
+        println!("Tree nodes: {}",g.tree.len());
 
         let mut rng = thread_rng();
         {
             let x1 = rng.gen_range(0..gridsize);
             let y1 = rng.gen_range(0..gridsize);
-            let x2 = rng.gen_range(x1..(x1+max_size).min(gridsize));
-            let y2 = rng.gen_range(y1..(y1+max_size).min(gridsize));
+            let x2 = rng.gen_range(x1..(x1+max_query_size).min(gridsize));
+            let y2 = rng.gen_range(y1..(y1+max_query_size).min(gridsize));
 
             let pos = BB::new(x1,y1,x2,y2);
             b.iter(||{
@@ -583,8 +747,76 @@ mod tests {
                     black_box(item);
                 });
             });
-
         }
+    }
+    #[bench]
+    fn benchmark_find_neighbors(b: &mut Bencher) {
+        let mut rng = Pcg64::seed_from_u64(42);
+        let gridsize = 8192;
+        let max_size = 64;
+        let max_query_size = 32;
 
+        let mut g = QuadBTree::new(gridsize);
+        for i in 0..1_000 {
+            let x1 = rng.gen_range(0..gridsize);
+            let y1 = rng.gen_range(0..gridsize);
+            let x2 = rng.gen_range(x1..(x1+max_size).min(gridsize));
+            let y2 = rng.gen_range(y1..(y1+max_size).min(gridsize));
+            let test_item = TestItem {
+                id: i,
+                pos: BB::new(x1,y1,x2,y2)
+            };
+            g.insert(test_item);
+        }
+        println!("Tree nodes: {}, top payloads: {}",g.tree.len(), g.tree[0].node_payload.len());
+
+        let mut rng = thread_rng();
+        {
+
+            b.iter(||{
+                let mut count = 0;
+                g.find_all_overlapping_neighbors(|a,b|{
+                    black_box(a);
+                    black_box(b);
+                    count+=1;
+                });
+                println!("Count: {}",count);
+
+            });
+        }
+    }
+    #[test]
+    fn benchmark_find_neighbors_test() {
+        let mut rng = Pcg64::seed_from_u64(42);
+        let gridsize = 8192;
+        let max_size = 2;
+        let max_query_size = 32;
+
+        let mut g = QuadBTree::new(gridsize);
+        for i in 0..1_000 {
+            let x1 = rng.gen_range(0..gridsize);
+            let y1 = rng.gen_range(0..gridsize);
+            let x2 = rng.gen_range(x1..(x1+max_size).min(gridsize));
+            let y2 = rng.gen_range(y1..(y1+max_size).min(gridsize));
+            let test_item = TestItem {
+                id: i,
+                pos: BB::new(x1,y1,x2,y2)
+            };
+            g.insert(test_item);
+        }
+        println!("Tree nodes: {}, top payloads: {}",g.tree.len(), g.tree[0].node_payload.len());
+
+        let mut rng = thread_rng();
+        {
+
+            {
+
+                g.find_all_overlapping_neighbors(|a,b|{
+                    black_box(a);
+                    black_box(b);
+
+                });
+            };
+        }
     }
 }
