@@ -45,6 +45,15 @@ pub struct BB {
 }
 
 impl BB {
+
+    /// Return a new BB, which is 'amount' larger in every direction
+    pub fn grow(self, amount: i32) -> BB {
+        BB {
+            top_left: self.top_left - Pos{x: amount, y:amount},
+            bottom_right: self.bottom_right + Pos{x: amount, y:amount},
+        }
+    }
+
     /// Return the distance between the two closest points on the two bounding boxes, according to
     /// a uniform norm/infinity norm. I.e, the number of steps which must be walked if
     /// one can walk up, down, left, right or diagonally.
@@ -74,7 +83,7 @@ impl BB {
     /// Create a new bounding box from the given coordinates.
     /// x1,y1 must be the top left corner, and x2,y2 must be the
     /// lower right.
-    pub fn new(x1:i32, y1:i32, x2:i32, y2:i32) -> BB {
+    pub const fn new(x1:i32, y1:i32, x2:i32, y2:i32) -> BB {
         BB {
             top_left: Pos {
                 x: x1,
@@ -167,7 +176,7 @@ fn get_set_bits_below(bitmap:u64, bit_index: u64) -> u32 {
     (bitmap & below_mask).count_ones()
 }
 
-#[derive(Savefile)]
+#[derive(Savefile,Clone)]
 struct TreeNode<T:WithSchema + Serialize + Deserialize+Introspect> {
     bb: BB,
     sub_cell_size: i32,
@@ -202,15 +211,13 @@ struct TreeNode<T:WithSchema + Serialize + Deserialize+Introspect> {
 /// do not each cover large areas. The function which returns overlapping items
 /// will have bad performance if the number of overlaps is too large (say more than
 /// a few on average per item).
-#[derive(Savefile)]
+#[derive(Savefile,Clone)]
 pub struct QuadBTree<T:TreeNodeItem + WithSchema + Serialize + Deserialize+Introspect> {
     /// Each position in this list is a node_index.
     tree: Vec<TreeNode<T>>, //The first position is always the root
     first_free: Option<u32>, //If there are free nodes, this is the first free node index.
     items: HashMap<T::Key, u32>, //map item key to tree node
 }
-
-
 
 
 
@@ -890,6 +897,8 @@ mod tests {
         assert_eq!(q.query(BB::new(2,2,4,4)), Vec::<&TestItem>::new());
         q.remove(42);
         assert_eq!(q.query(BB::new(9,9,16,16)), Vec::<&TestItem>::new());
+
+        let _ = q.clone(); //Just check clone works
     }
     #[test]
     fn basic_find_neighbors_test() {
