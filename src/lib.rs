@@ -165,14 +165,29 @@ fn get_set_bits_below(bitmap:u64, bit_index: u64) -> u32 {
 
 struct TreeNode<T> {
     bb: BB,
-    sub_cell_shift: u32,
-    node_bitmap: u64,
-    node_payload: SmallVec<[T;4]>,
-    node_children: SmallVec<[u32;4]>,
-    next_free: Option<u32>, //If TreeNode is part of free-list, this is the next free
-    parent: u32, //The root has parent id 0. It doesn't really have a parent of its own, but it has 0 here.
-    node_place: u32,
     sub_cell_size: i32,
+    sub_cell_shift: u32,
+    /// Terminology:
+    /// This bitmap contains 64 bits. Each bit corresponds to a 'place'.
+    /// The places are the 64 cells in the 8x8 grid of this node. I.e,
+    /// the place number has geometric interpretation.
+    /// The numbering is in row-major order.
+    node_bitmap: u64,
+    /// Actual payload items
+    node_payload: SmallVec<[T;4]>,
+    /// Terminology:
+    /// Each TreeNode can at most have 64 children. Typically, not all are populated.
+    /// Each element in 'node_children' is a 'slot'. Each slot is identified by its 'slot_index'.
+    node_children: SmallVec<[u32;4]>,
+    /// Terminology:
+    /// The tree nodes are identified by an 'index'.
+    /// Root node always has index 0.
+    /// If TreeNode is part of free-list, this is the next free
+    next_free: Option<u32>,
+    /// The root has parent id 0. It doesn't really have a parent of its own, but it has 0 here.
+    parent: u32,
+    /// The place of this node in the 8x8 grid of its parent. Row major order.
+    node_place: u32,
 }
 
 /// 2D non-balanced B-tree of bounded depth, for storing integer rectangles, and doing
@@ -183,8 +198,9 @@ struct TreeNode<T> {
 /// will have bad performance if the number of overlaps is too large (say more than
 /// a few on average per item).
 pub struct QuadBTree<T:TreeNodeItem> {
+    /// Each position in this list is a node_index.
     tree: Vec<TreeNode<T>>, //The first position is always the root
-    first_free: Option<u32>, //If there are free nodes, this is the first free
+    first_free: Option<u32>, //If there are free nodes, this is the first free node index.
     items: HashMap<T::Key, u32>, //map item key to tree node
 }
 
@@ -232,7 +248,7 @@ impl<T:TreeNodeItem> QuadBTree<T> {
             return; //Root node is never removed.
         }
         let node : &mut TreeNode<T> = &mut self.tree[node_index];
-        let parent_index = node.parent as usize;
+        let parent_node_index = node.parent as usize;
         if node.node_payload.is_empty() == false || node.node_children.is_empty()==false {
             return;
         }
@@ -242,22 +258,25 @@ impl<T:TreeNodeItem> QuadBTree<T> {
         node.next_free = self.first_free;
         self.first_free = Some(node_index as u32);
         {
-            let node_node_place = node.node_place;
-            let parent_node:&mut TreeNode<T> = &mut self.tree[parent_index];
-            let place_index = get_set_bits_below(parent_node.node_bitmap, node_node_place as u64);
-            parent_node.node_children.remove(place_index as usize);
-            parent_node.node_bitmap &= !(1u64<<node_node_place);
+            let node_place = node.node_place;
+            let parent_node:&mut TreeNode<T> = &mut self.tree[parent_node_index];
+            let slot_index = get_set_bits_below(parent_node.node_bitmap, node_place as u64);
+            parent_node.node_children.remove(slot_index as usize);
+            parent_node.node_bitmap &= !(1u64<< node_place);
             debug_assert_eq!(parent_node.node_bitmap.count_ones() as usize, parent_node.node_children.len());
-            self.remove_node_if_unused(parent_index)
+            self.remove_node_if_unused(parent_node_index);
         }
     }
 
+    /// This routine returns a bitmask with all place's encompassed by a rectangle
+    /// from (x1,y1) to (x2,y2), inclusive. It uses AVX512-magic.
     #[cfg(all(target_feature = "avx512vl", target_feature="avx512bw"))]
     #[inline(always)]
     fn spread_op(x1:i32,y1:i32,x2:i32, y2:i32) -> u64 {
         let each_row = ((2<<(x2 as u8))-1) & ! ((1<<x1)-1);
         let rows_mask = ((2<<(y2 as u8))-1) & ! ((1<<y1)-1);
         unsafe {
+            // This is basically severe magic.
             let xtemp =  _mm_set1_epi8(each_row);
             let x = _mm_maskz_broadcastb_epi8(rows_mask, xtemp);
             let x = _mm_cvtsi128_si64x(x) as u64;
@@ -265,11 +284,15 @@ impl<T:TreeNodeItem> QuadBTree<T> {
         }
     }
 
+
+    /// This routine returns a bitmask with all place's encompassed by a rectangle
+    /// from (x1,y1) to (x2,y2), inclusive.
     #[cfg(not(all(target_feature = "avx512vl", target_feature="avx512bw")))]
     #[inline(always)]
     fn spread_op(x1:i32,y1:i32,x2:i32, y2:i32) -> u64 {
         let each_row = ((2u8<<(x2 as u8)).wrapping_sub(1u8)) & ! ((1<<x1)-1);
         let rows_mask = ((256u64<<(y2 as u64*8)).wrapping_sub(1)) & ! ((1u64<<(y1*8))-1);
+        // This is basically magic.
         unsafe {
             let mm_all_rows = _mm_set1_epi8(each_row as i8);
             let mm_rows_mask: __m128i = _mm_set1_epi64x(rows_mask as i64);
@@ -278,9 +301,80 @@ impl<T:TreeNodeItem> QuadBTree<T> {
             return x;
         }
     }
+    /// Find all pairs of objects in 'self' which overlap an object in 'other'.
+    /// The same object may be reported as part of many pairs.
+    /// Performance is O(N^2) worst case when all objects overlap, and O(N) base case when
+    /// none do, given N objects in each tree.
+    pub fn find_all_overlapping_neighbors2<'a,F:FnMut(&'a T, &'a T)>(&'a self, other:&'a QuadBTree<T>, mut f: F) {
+        //let presently_relevant = vec![0u64;(self.tree.len()+63)/64];
+        //let mut relevance_bits: Vec::<u64>::new();
 
+        let mut candidate_stack_a = Vec::new();
+        let mut candidate_stack_b = Vec::new();
+        let mut temps_a = [vec![],vec![],vec![],vec![],vec![],vec![],vec![],vec![]];
+        let mut temps_b = [vec![],vec![],vec![],vec![],vec![],vec![],vec![],vec![]];
+
+        if self.tree[0].bb!=other.tree[0].bb {
+            panic!("Both QuadBTree must have identical bounding boxes");
+        }
+
+        self.find_all_overlapping_neighbors_impl2(other, 0, 0, &mut candidate_stack_a,&mut candidate_stack_b, &mut f, &mut temps_a, &mut temps_b);
+    }
+    fn find_all_overlapping_neighbors_impl2<'a,F:FnMut(&'a T, &'a T)>(&'a self, other:&'a QuadBTree<T>, self_node_index: usize, other_node_index: usize, candidate_stack_ref_a: &mut Vec<&'a T>, candidate_stack_ref_b: &mut Vec<&'a T>, f: &mut F, temps_a: &mut [Vec<&'a T>], temps_b: &mut [Vec<&'a T>]) {
+
+        //let candidate_watermark = candidate_stack.len();
+        let self_node = &self.tree[self_node_index];
+        let other_node = &other.tree[other_node_index];
+
+        debug_assert_eq!(self_node.bb, other_node.bb);
+
+        let (first,second_a) = temps_a.split_at_mut(1);
+        let mut candidate_stack_a:&mut Vec<_>;
+        candidate_stack_a = &mut first[0];
+        candidate_stack_a.clear();
+        candidate_stack_a.extend(candidate_stack_ref_a.iter().copied().filter(|x|x.get_bb().overlaps(self_node.bb)));
+
+        let (first,second_b) = temps_b.split_at_mut(1);
+        let mut candidate_stack_b:&mut Vec<_>;
+        candidate_stack_b = &mut first[0];
+        candidate_stack_b.clear();
+        candidate_stack_b.extend(candidate_stack_ref_b.iter().copied().filter(|x|x.get_bb().overlaps(self_node.bb)));
+
+
+
+        candidate_stack_a.extend(self_node.node_payload.iter());
+
+        for cand in candidate_stack_a.iter().copied()
+        {
+            for item in other_node.node_payload.iter() {
+                if item.get_bb().overlaps(cand.get_bb()) {
+                    f(cand, item);
+                }
+            }
+        }
+
+        for cand in candidate_stack_b.iter().copied()
+        {
+            for item in self_node.node_payload.iter() {
+                if item.get_bb().overlaps(cand.get_bb()) {
+                    f(item, cand);
+                }
+            }
+        }
+        candidate_stack_b.extend(other_node.node_payload.iter());
+
+        for self_child_index in self_node.node_children.iter().copied() {
+            let place = self.tree[self_child_index as usize].node_place; //The place is as valid for 'self' as for 'other', since it is a geometric sub place of the current node bounding box
+            if other_node.node_bitmap&(1u64<<place) != 0 {
+                let other_child_slot_index = get_set_bits_below(other_node.node_bitmap, place as u64);
+                let other_child_node_index = other_node.node_children[other_child_slot_index as usize];
+                self.find_all_overlapping_neighbors_impl2(other, self_child_index as usize, other_child_node_index as usize, &mut candidate_stack_a, &mut candidate_stack_b, f, second_a, second_b);
+            }
+        }
+    }
     /// Find all pairs of objects which overlap each other.
     /// Each pair (a,b) will only be reported once, not twice as in (a,b) and (b,a).
+    /// The order ( (a,b) or (b,a) ) is arbitrary.
     /// The same object may be reported as part of many pairs.
     /// Performance is O(N^2) worst case when all objects overlap, and O(N) base case when
     /// none do.
@@ -325,7 +419,6 @@ impl<T:TreeNodeItem> QuadBTree<T> {
         for child in node.node_children.iter().copied() {
             self.find_all_overlapping_neighbors_impl(child as usize, &mut candidate_stack, f, second);
         }
-        //candidate_stack.truncate(candidate_watermark );
     }
 
     fn query_impl<'a,F:FnMut(&'a T)>(&'a self, node_index: usize, bb: BB, f:&mut F) {
@@ -351,23 +444,23 @@ impl<T:TreeNodeItem> QuadBTree<T> {
         let y1 = (off.top_left.y>>node.sub_cell_shift).clamp(0,7);
         let y2 = (off.bottom_right.y>>node.sub_cell_shift).clamp(0,7);
 
-        let bb_mask = Self::spread_op(x1,y1,x2,y2);
-        let mut child_mask:u64 = node.node_bitmap&bb_mask;
+        let bb_place_mask = Self::spread_op(x1, y1, x2, y2);
+        let mut children_place_mask:u64 = node.node_bitmap&bb_place_mask;
         //compile_error!("Continue optimizing")
-        while child_mask!=0 {
-            let cur_child = child_mask.trailing_zeros() as u64;
-            let cur_child_mask = 1<<cur_child;
-            child_mask &= !cur_child_mask;
-            let child_place = ((cur_child_mask-1)&node.node_bitmap).count_ones();
-            let child_node_index = node.node_children[child_place as usize];
+        while children_place_mask !=0 {
+            let cur_child_place = children_place_mask.trailing_zeros() as u64;
+            let cur_child_place_mask = 1<< cur_child_place;
+            children_place_mask &= !cur_child_place_mask;
+            let child_slot_index = ((cur_child_place_mask - 1)&node.node_bitmap).count_ones();
+            let child_node_index = node.node_children[child_slot_index as usize];
 
 
             #[cfg(debug_assertions)]
                 {
                     let childnode:&TreeNode<T> = &self.tree[child_node_index as usize];
                     debug_assert_eq!(childnode.parent as usize, node_index);
-                    let cur_child_x1 = cur_child%8;
-                    let cur_child_y1 = cur_child/8;
+                    let cur_child_x1 = cur_child_place %8;
+                    let cur_child_y1 = cur_child_place /8;
                     {
                         debug_assert_eq!(childnode.bb.top_left.x, node.bb.top_left.x + cur_child_x1 as i32*node.sub_cell_size);
                     }
@@ -465,8 +558,8 @@ impl<T:TreeNodeItem> QuadBTree<T> {
     pub fn remove(&mut self, key: T::Key) -> Option<T> {
         if let Some(node_index) = self.items.remove(&key) {
             let node : &mut TreeNode<T> = &mut self.tree[node_index as usize];
-            if let Some(placement_index) = node.node_payload.iter().position(|x|x.get_key()==key) {
-                let t = node.node_payload.swap_remove(placement_index);
+            if let Some(payload_index) = node.node_payload.iter().position(|x|x.get_key()==key) {
+                let t = node.node_payload.swap_remove(payload_index);
                 self.remove_node_if_unused(node_index as usize);
                 Some(t)
             } else {
@@ -496,18 +589,18 @@ impl<T:TreeNodeItem> QuadBTree<T> {
         let y2 = (off.bottom_right.y>>node.sub_cell_shift).clamp(0,7);
 
         if node.sub_cell_size >= 8 && x1==x2 && y1==y2 {
-            let bitmap_index = x1 + (y1<<3);
-            if node.node_bitmap & (1<<(bitmap_index as usize)) != 0 {
+            let bitmap_place_index = x1 + (y1<<3);
+            if node.node_bitmap & (1<<(bitmap_place_index as usize)) != 0 {
                 // Child node exists
-                let insertion_place = get_set_bits_below(node.node_bitmap, bitmap_index as u64);
-                let child_node_index = node.node_children[insertion_place as usize] as usize;
+                let insertion_slot_index = get_set_bits_below(node.node_bitmap, bitmap_place_index as u64);
+                let child_node_index = node.node_children[insertion_slot_index as usize] as usize;
                 debug_assert_eq!(node.node_bitmap.count_ones() as usize, node.node_children.len());
                 self.insert_impl(item, child_node_index);
 
             } else {
                 // Child node must be created
-                let insertion_place = get_set_bits_below(node.node_bitmap, bitmap_index as u64);
-                node.node_bitmap |= 1<<(bitmap_index as usize);
+                let insertion_slot_index = get_set_bits_below(node.node_bitmap, bitmap_place_index as u64);
+                node.node_bitmap |= 1<<(bitmap_place_index as usize);
 
                 let top_left = node.bb.top_left + Pos {
                     x: x1<<node.sub_cell_shift,
@@ -528,7 +621,7 @@ impl<T:TreeNodeItem> QuadBTree<T> {
                 let new_child_node;
                 if let Some(free) = self.first_free {
                     new_child_node = free as usize;
-                    node.node_children.insert(insertion_place as usize, new_child_node as u32);
+                    node.node_children.insert(insertion_slot_index as usize, new_child_node as u32);
                     debug_assert_eq!(node.node_bitmap.count_ones() as usize, node.node_children.len());
                     new_node = &mut self.tree[free as usize];
                     self.first_free = new_node.next_free;
@@ -539,10 +632,10 @@ impl<T:TreeNodeItem> QuadBTree<T> {
                     debug_assert_eq!(new_node.node_payload.len(),0);
                     debug_assert_eq!(new_node.node_children.len(),0);
                     new_node.parent = node_index as u32;
-                    new_node.node_place = bitmap_index as u32;
+                    new_node.node_place = bitmap_place_index as u32;
                 } else {
                     new_child_node = self_tree_len;
-                    node.node_children.insert(insertion_place as usize, new_child_node as u32);
+                    node.node_children.insert(insertion_slot_index as usize, new_child_node as u32);
                     debug_assert_eq!(node.node_bitmap.count_ones() as usize, node.node_children.len());
                     self.tree.push(TreeNode {
                         bb:new_bb,
@@ -553,7 +646,7 @@ impl<T:TreeNodeItem> QuadBTree<T> {
                         node_children: smallvec![],
                         next_free: None,
                         parent: node_index as u32,
-                        node_place: bitmap_index as u32
+                        node_place: bitmap_place_index as u32
                     });
                 }
                 assert!( (new_child_node as u64) < u32::MAX as u64);
@@ -683,6 +776,22 @@ mod tests {
             }
         }
 
+        overlaps.clear();
+        g.find_all_overlapping_neighbors2(&g, |a,b|{
+            assert!(overlaps.insert((a.id, b.id)));
+        });
+        for item_a in all_inserted.iter() {
+            for item_b in all_inserted.iter() {
+                let does_overlap = item_a.pos.overlaps(item_b.pos);
+                let expected_overlaps = if does_overlap {1} else {0};
+                let mut found_overlaps = 0;
+                if overlaps.contains(&(item_a.id,item_b.id)) {
+                    found_overlaps += 1;
+                }
+                assert_eq!(expected_overlaps, found_overlaps);
+            }
+        }
+
         for item in all_inserted {
             let t = g.get_by_key(item.get_key()).unwrap();
             assert_eq!(&item, t);
@@ -704,7 +813,7 @@ mod tests {
     #[test]
     fn exhaustive_insert_remove_query_single_op_test() {
         for seed in 0..100000 {
-            //println!("Testing seed {}", seed);
+            println!("Testing seed {}", seed);
             random_insert_and_query_test(seed,2,true,1024, None);
         }
     }
@@ -732,7 +841,8 @@ mod tests {
     }
     #[test]
     fn exhaustive_insert_test_seed() {
-        random_insert_and_query_test(62,1,false,1024, None);
+
+        random_insert_and_query_test(190,2,true,1024, None);
     }
     #[test]
     fn exhaustive_insert_remove_test_seed9() {
@@ -785,15 +895,45 @@ mod tests {
         };
         let test_item3 = TestItem {
             id: 44,
-            pos: BB::new(26, 26, 27, 27)
+            pos: BB::new(25, 25, 27, 27)
         };
         q.insert(test_item1);
         q.insert(test_item2);
         q.insert(test_item3);
+        let mut found = Vec::new();
         q.find_all_overlapping_neighbors(|a,b|{
+            found.push((a.id,b.id));
            println!("Found neighbors: {:?} & {:?}", a.id, b.id);
         });
+        assert_eq!(found,vec![(44,43)]);
     }
+    #[test]
+    fn basic_find_neighbors2_test() {
+        let mut q_a = QuadBTree::new(256);
+        let mut q_b = QuadBTree::new(256);
+        let test_item1a = TestItem {
+            id: 42,
+            pos: BB::new(10, 10, 25, 25)
+        };
+        let test_item2b = TestItem {
+            id: 43,
+            pos: BB::new(20, 20, 25, 25)
+        };
+        let test_item3b = TestItem {
+            id: 44,
+            pos: BB::new(26, 26, 27, 27)
+        };
+        q_a.insert(test_item1a);
+        q_b.insert(test_item2b);
+        q_b.insert(test_item3b);
+        let mut found = Vec::new();
+        q_a.find_all_overlapping_neighbors2(&q_b, |a,b|{
+            println!("Found neighbors: {:?} & {:?}", a.id, b.id);
+            found.push((a.id,b.id));
+        });
+        assert_eq!(found,vec![(42,43)]);
+    }
+
     #[test]
     fn bb_test1() {
         let bb1 = BB::new(20, 20, 25, 25);
