@@ -1,3 +1,7 @@
+//! 2D non-balanced B-tree of bounded depth, for storing integer rectangles, and doing
+//! efficient searches through them.
+#![deny(warnings)]
+#![deny(missing_docs)]
 #![feature(int_log)]
 #![feature(stdsimd)]
 #![feature(bench_black_box)]
@@ -13,9 +17,12 @@ use std::arch::x86_64::{__m128i, _mm_set1_epi8, _mm_cvtsi128_si64x, _mm_and_si12
 use std::arch::x86_64::{_mm_broadcastb_epi8, _mm_maskz_broadcastb_epi8};
 use smallvec::SmallVec;
 
+/// A coordinate point in the 2D world
 #[derive(Clone,Copy,PartialEq,Debug,Eq,Hash)]
 pub struct Pos {
+    /// The x-coordinate
     pub x: i32,
+    /// The y-coordinate
     pub y: i32,
 }
 
@@ -25,7 +32,11 @@ pub struct Pos {
 /// the box.
 #[derive(Clone,Copy,PartialEq,Debug,Eq,Hash)]
 pub struct BB {
+    /// The top left corner of the bounding box. The corner itself is considered part
+    /// of the box.
     pub top_left: Pos,
+    /// The bottom right corner of the bounding box. The corner itself is considered part
+    /// of the box.
     pub bottom_right: Pos,
 }
 
@@ -71,6 +82,9 @@ impl BB {
             }
         }
     }
+
+    /// Return true if the two boxes overlap. They must actually
+    /// overlap, it is not enough that they are just adjacent.
     #[inline(always)]
     pub fn overlaps(self, other: BB) -> bool {
         if  self.top_left.x > other.bottom_right.x ||
@@ -125,6 +139,8 @@ impl Sub<Pos> for BB {
     }
 }
 
+/// Trait which must be implemented by objects which are to be stored
+/// in the QuadBTree map.
 pub trait TreeNodeItem {
     /// The type of a unique key identifying a specific item.
     /// If you don't need this, you can use the BB as the key,
@@ -132,11 +148,9 @@ pub trait TreeNodeItem {
     type Key : PartialEq+Eq+Hash;
 
     /// Return bounding box for the given item
-    #[inline(always)]
     fn get_bb(&self) -> BB;
 
     /// Return a key identifying a particular item.
-    #[inline(always)]
     fn get_key(&self) -> Self::Key;
 
     /// Must update the bounding box of the object to the given bounding box
@@ -161,6 +175,13 @@ struct TreeNode<T> {
     sub_cell_size: i32,
 }
 
+/// 2D non-balanced B-tree of bounded depth, for storing integer rectangles, and doing
+/// efficient searches through them.
+/// Items inserted should have unique id:s. Only 2D i32 coordinates are supported.
+/// Best performance will be had for items which are *evenly distributed*, and
+/// do not each cover large areas. The function which returns overlapping items
+/// will have bad performance if the number of overlaps is too large (say more than
+/// a few on average per item).
 pub struct QuadBTree<T:TreeNodeItem> {
     tree: Vec<TreeNode<T>>, //The first position is always the root
     first_free: Option<u32>, //If there are free nodes, this is the first free
@@ -176,6 +197,9 @@ impl<T:TreeNodeItem> QuadBTree<T> {
     /// for objects which are to be put into the tree.
     /// This means that if size is 256, the coordinate (256,0) is _not_valid, but
     /// (255,0) is.
+    ///
+    /// The smaller the size, the faster performance will be. However, by design, situations
+    /// where many items would be expected to occupy the same 8x8 area should be avoided.
     pub fn new(size: i32) -> QuadBTree<T> {
         let shift = (size as u32).log2();
         if 1<<shift != size {
@@ -255,7 +279,11 @@ impl<T:TreeNodeItem> QuadBTree<T> {
         }
     }
 
-    ///
+    /// Find all pairs of objects which overlap each other.
+    /// Each pair (a,b) will only be reported once, not twice as in (a,b) and (b,a).
+    /// The same object may be reported as part of many pairs.
+    /// Performance is O(N^2) worst case when all objects overlap, and O(N) base case when
+    /// none do.
     pub fn find_all_overlapping_neighbors<'a,F:FnMut(&'a T, &'a T)>(&'a self, mut f: F) {
         //let presently_relevant = vec![0u64;(self.tree.len()+63)/64];
         //let mut relevance_bits: Vec::<u64>::new();
@@ -352,15 +380,46 @@ impl<T:TreeNodeItem> QuadBTree<T> {
             self.query_impl(child_node_index as usize, bb, &mut *f);
         }
     }
+
+    /// Find all objects within the given bounding box. Performance is approximately
+    /// O(N) where N is the number of items in the box, unless there are many large
+    /// objects which almost overlap. This worst case is O(M) where M is the total number
+    /// of items in the map.
+    ///
+    /// This method returns references to all items overlapping the box.
     #[inline(always)]
     pub fn query(&self, bb:BB) -> Vec<&T> {
         let mut ret = vec![];
         self.query_impl(0, bb, &mut |item|ret.push(item));
         ret
     }
+
+    /// Find all objects within the given bounding box. Performance is approximately
+    /// O(N) where N is the number of items in the box, unless there are many large
+    /// objects which almost overlap. This worst case is O(M) where M is the total number
+    /// of items in the map.
+    ///
+    /// This method calls the provided closure for each item within the bounding box.
     #[inline(always)]
     pub fn query_fn<F:FnMut(&T)>(&self, bb: BB, mut f:F) {
         self.query_impl(0,bb,&mut f)
+    }
+
+    /// Get the object with the given key, or None if not found.
+    /// Expected performance is O(1) best case, and O(N) worst case. Expect
+    /// performance to deteriorate if there are many items nearby the item searched for.
+    pub fn get_by_key(&self, key: T::Key) -> Option<&T> {
+        if let Some(item) = self.items.get(&key).copied() {
+            for payload_item in self.tree[item as usize].node_payload.iter() {
+                if payload_item.get_key() == key {
+                    return Some(payload_item);
+                }
+            }
+            debug_assert!(false); //We shouldn't ever get here.
+            None
+        } else {
+            None
+        }
     }
 
     /// Returns true if an item with the given key was moved to the
@@ -419,10 +478,12 @@ impl<T:TreeNodeItem> QuadBTree<T> {
 
     }
 
-    /// Insert the given item into the QuadBTree
+    /// Insert the given item into the QuadBTree.
+    /// The performance of this operation is approximately O(1), amortized.
     pub fn insert(&mut self, item:T) {
         self.insert_impl(item, 0);
     }
+
     fn insert_impl(&mut self, item:T, node_index: usize) {
         let self_tree_len = self.tree.len();
         let node = &mut self.tree[node_index];
@@ -513,10 +574,9 @@ mod tests {
     use rand::Rng;
     use rand::prelude::*;
     use rand_pcg::Pcg64;
-    use std::collections::HashSet;
+    use std::collections::{HashSet};
     use test::Bencher;
     use std::hint::black_box;
-    use std::time::Instant;
 
     extern crate test;
 
@@ -601,8 +661,36 @@ mod tests {
             let g_hit :HashSet<TestItem>= g.query(pos).iter().cloned().cloned().collect();
             let correct_hits:HashSet<TestItem> = all_inserted.iter().filter(|x|x.pos.overlaps(pos)).cloned().collect();
             assert_eq!(g_hit,correct_hits);
-
         }
+
+        let mut overlaps = HashSet::new();
+        g.find_all_overlapping_neighbors(|a,b|{overlaps.insert((a.id, b.id));});
+        for item_a in all_inserted.iter() {
+            for item_b in all_inserted.iter() {
+                if item_a.id==item_b.id {
+                    continue;
+                }
+                let does_overlap = item_a.pos.overlaps(item_b.pos);
+                let expected_overlaps = if does_overlap {1} else {0};
+                let mut found_overlaps = 0;
+                if overlaps.contains(&(item_a.id,item_b.id)) {
+                    found_overlaps += 1;
+                }
+                if overlaps.contains(&(item_b.id,item_a.id)) {
+                    found_overlaps += 1;
+                }
+                assert_eq!(expected_overlaps, found_overlaps);
+            }
+        }
+
+        for item in all_inserted {
+            let t = g.get_by_key(item.get_key()).unwrap();
+            assert_eq!(&item, t);
+            let t = g.remove(item.get_key()).unwrap();
+            assert_eq!(item, t);
+        }
+
+
 
 
     }
@@ -754,7 +842,7 @@ mod tests {
         let mut rng = Pcg64::seed_from_u64(42);
         let gridsize = 8192;
         let max_size = 64;
-        let max_query_size = 32;
+
 
         let mut g = QuadBTree::new(gridsize);
         for i in 0..1_000 {
@@ -770,7 +858,6 @@ mod tests {
         }
         println!("Tree nodes: {}, top payloads: {}",g.tree.len(), g.tree[0].node_payload.len());
 
-        let mut rng = thread_rng();
         {
 
             b.iter(||{
@@ -790,7 +877,6 @@ mod tests {
         let mut rng = Pcg64::seed_from_u64(42);
         let gridsize = 8192;
         let max_size = 2;
-        let max_query_size = 32;
 
         let mut g = QuadBTree::new(gridsize);
         for i in 0..1_000 {
@@ -806,7 +892,6 @@ mod tests {
         }
         println!("Tree nodes: {}, top payloads: {}",g.tree.len(), g.tree[0].node_payload.len());
 
-        let mut rng = thread_rng();
         {
 
             {
