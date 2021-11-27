@@ -22,7 +22,7 @@ use smallvec::SmallVec;
 use savefile::{WithSchema, Serialize, Deserialize, Introspect};
 
 /// A coordinate point in the 2D world
-#[derive(Debug,Clone,Copy,PartialEq,Debug,Eq,Hash,Savefile)]
+#[derive(Debug,Clone,Copy,PartialEq,Eq,Hash,Savefile)]
 pub struct Pos {
     /// The x-coordinate
     pub x: i32,
@@ -34,7 +34,7 @@ pub struct Pos {
 /// both the top_left corner and the bottom right corner.
 /// An object within a bounding box is contained entirely within
 /// the box.
-#[derive(Debug,Clone,Copy,PartialEq,Debug,Eq,Hash,Savefile)]
+#[derive(Debug,Clone,Copy,PartialEq,Eq,Hash,Savefile)]
 pub struct BB {
     /// The top left corner of the bounding box. The corner itself is considered part
     /// of the box.
