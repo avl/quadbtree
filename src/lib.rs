@@ -40,7 +40,7 @@ pub struct BB {
     /// of the box.
     pub top_left: Pos,
     /// The bottom right corner of the bounding box. The corner itself is considered part
-    /// of the box.
+    /// of the box. I.e, this is an inclusive bound.
     pub bottom_right: Pos,
 }
 
