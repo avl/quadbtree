@@ -22,7 +22,7 @@ use smallvec::SmallVec;
 use savefile::{WithSchema, Serialize, Deserialize, Introspect};
 
 /// A coordinate point in the 2D world
-#[derive(Clone,Copy,PartialEq,Debug,Eq,Hash,Savefile)]
+#[derive(Debug,Clone,Copy,PartialEq,Debug,Eq,Hash,Savefile)]
 pub struct Pos {
     /// The x-coordinate
     pub x: i32,
@@ -34,7 +34,7 @@ pub struct Pos {
 /// both the top_left corner and the bottom right corner.
 /// An object within a bounding box is contained entirely within
 /// the box.
-#[derive(Clone,Copy,PartialEq,Debug,Eq,Hash,Savefile)]
+#[derive(Debug,Clone,Copy,PartialEq,Debug,Eq,Hash,Savefile)]
 pub struct BB {
     /// The top left corner of the bounding box. The corner itself is considered part
     /// of the box.
@@ -176,7 +176,7 @@ fn get_set_bits_below(bitmap:u64, bit_index: u64) -> u32 {
     (bitmap & below_mask).count_ones()
 }
 
-#[derive(Savefile,Clone)]
+#[derive(Savefile,Clone,Debug)]
 struct TreeNode<T:WithSchema + Serialize + Deserialize+Introspect> {
     bb: BB,
     sub_cell_size: i32,
@@ -211,7 +211,7 @@ struct TreeNode<T:WithSchema + Serialize + Deserialize+Introspect> {
 /// do not each cover large areas. The function which returns overlapping items
 /// will have bad performance if the number of overlaps is too large (say more than
 /// a few on average per item).
-#[derive(Savefile,Clone)]
+#[derive(Savefile,Clone,Debug)]
 pub struct QuadBTree<T:TreeNodeItem + WithSchema + Serialize + Deserialize+Introspect> {
     /// Each position in this list is a node_index.
     tree: Vec<TreeNode<T>>, //The first position is always the root
