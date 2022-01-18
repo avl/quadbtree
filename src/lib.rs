@@ -9,10 +9,10 @@
 
 #[macro_use]
 extern crate savefile_derive;
-
+use indexmap::IndexMap;
 use std::ops::{Sub, Add};
 use smallvec::smallvec;
-use std::collections::HashMap;
+
 use std::hash::Hash;
 use std::arch::x86_64::{__m128i, _mm_set1_epi8, _mm_cvtsi128_si64x, _mm_and_si128, _mm_set1_epi64x};
 
@@ -216,12 +216,18 @@ pub struct QuadBTree<T:TreeNodeItem + WithSchema + Serialize + Deserialize+Intro
     /// Each position in this list is a node_index.
     tree: Vec<TreeNode<T>>, //The first position is always the root
     first_free: Option<u32>, //If there are free nodes, this is the first free node index.
-    items: HashMap<T::Key, u32>, //map item key to tree node
+    items: IndexMap<T::Key, u32>, //map item key to tree node
 }
 
 
 
 impl<T:TreeNodeItem + WithSchema + Serialize + Deserialize+Introspect> QuadBTree<T> {
+
+
+    /// Iterate over all elements in tree
+    pub fn iter(&self) -> impl Iterator<Item=&T> {
+        self.tree.iter().flat_map(|x|x.node_payload.iter())
+    }
 
     /// Create a new QuadBTree of the given size.
     /// Only coordinates in the range 0..size are allowed
@@ -254,7 +260,7 @@ impl<T:TreeNodeItem + WithSchema + Serialize + Deserialize+Introspect> QuadBTree
         QuadBTree {
             tree: vec![root],
             first_free: None,
-            items: HashMap::new()
+            items: IndexMap::new()
         }
     }
 

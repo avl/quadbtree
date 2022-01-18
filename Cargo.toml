@@ -11,7 +11,7 @@ debug = true
 smallvec="1.6"
 savefile = "0.9"
 savefile-derive = "0.9"
-
+indexmap="1.6"
 [dev-dependencies]
 rand = "0.8"
 rand_pcg = "0.3"
