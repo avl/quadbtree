@@ -9,8 +9,8 @@ debug = true
 
 [dependencies]
 smallvec="1.6"
-savefile = "0.9"
-savefile-derive = "0.9"
+savefile = "0.10"
+savefile-derive = "0.10"
 indexmap="1.6"
 [dev-dependencies]
 rand = "0.8"
