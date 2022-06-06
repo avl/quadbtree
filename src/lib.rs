@@ -219,14 +219,59 @@ pub struct QuadBTree<T:TreeNodeItem + WithSchema + Serialize + Deserialize+Intro
     items: IndexMap<T::Key, u32>, //map item key to tree node
 }
 
+impl<T:TreeNodeItem + WithSchema + Serialize + Deserialize+Introspect + Clone> QuadBTree<T> {
+    /// Returns true if an item with the given key was moved to the
+    /// new bounding box location. False if item was not found.
+    pub fn move_item(&mut self, item: &T) -> bool {
+        let key = item.get_key();
+        let bb = item.get_bb();
+        if let Some(node_index) = self.items.get(&key).copied() {
+            let node : &mut TreeNode<T> = &mut self.tree[node_index as usize];
+            if bb.is_contained_in(node.bb) {
 
+                let off : BB = bb - node.bb.top_left;
+                let x1 = (off.top_left.x>>node.sub_cell_shift).clamp(0,7);
+                let x2 = (off.bottom_right.x>>node.sub_cell_shift).clamp(0,7);
+                let y1 = (off.top_left.y>>node.sub_cell_shift).clamp(0,7);
+                let y2 = (off.bottom_right.y>>node.sub_cell_shift).clamp(0,7);
+                if !(node.sub_cell_size >= 8 && x1==x2 && y1==y2) {
+                    //No big expensive op needed.
+                    for item in node.node_payload.iter_mut() {
+                        if item.get_key() == key {
+                            item.move_item(bb);
+                            return true;
+                        }
+                    }
+                    return true;
+                }
+            }
+            // This could be optimized slightly.
+            let item = self.remove(key);
+            if let Some(mut item) = item {
+                item.move_item(bb);
+                self.insert(item);
+                true
+            } else {
+                false
+            }
+        } else {
+            self.insert((*item).clone());
+            false
+        }
+    }
+
+}
 
 impl<T:TreeNodeItem + WithSchema + Serialize + Deserialize+Introspect> QuadBTree<T> {
-
 
     /// Iterate over all elements in tree
     pub fn iter(&self) -> impl Iterator<Item=&T> {
         self.tree.iter().flat_map(|x|x.node_payload.iter())
+    }
+
+    /// Then number of items in the tree
+    pub fn item_count(&self) -> usize {
+        self.items.len()
     }
 
     /// Create a new QuadBTree of the given size.
@@ -289,6 +334,7 @@ impl<T:TreeNodeItem + WithSchema + Serialize + Deserialize+Introspect> QuadBTree
         }
     }
 
+    /*
     /// This routine returns a bitmask with all place's encompassed by a rectangle
     /// from (x1,y1) to (x2,y2), inclusive. It uses AVX512-magic.
     #[cfg(all(target_feature = "avx512vl", target_feature="avx512bw"))]
@@ -304,7 +350,7 @@ impl<T:TreeNodeItem + WithSchema + Serialize + Deserialize+Introspect> QuadBTree
             x
         }
     }
-
+*/
 
     /// This routine returns a bitmask with all place's encompassed by a rectangle
     /// from (x1,y1) to (x2,y2), inclusive.
@@ -536,42 +582,7 @@ impl<T:TreeNodeItem + WithSchema + Serialize + Deserialize+Introspect> QuadBTree
         }
     }
 
-    /// Returns true if an item with the given key was moved to the
-    /// new bounding box location. False if item was not found.
-    pub fn move_item(&mut self, key: T::Key, bb: BB) -> bool {
-        if let Some(node_index) = self.items.get(&key).copied() {
-            let node : &mut TreeNode<T> = &mut self.tree[node_index as usize];
-            if bb.is_contained_in(node.bb) {
 
-                let off : BB = bb - node.bb.top_left;
-                let x1 = (off.top_left.x>>node.sub_cell_shift).clamp(0,7);
-                let x2 = (off.bottom_right.x>>node.sub_cell_shift).clamp(0,7);
-                let y1 = (off.top_left.y>>node.sub_cell_shift).clamp(0,7);
-                let y2 = (off.bottom_right.y>>node.sub_cell_shift).clamp(0,7);
-                if !(node.sub_cell_size >= 8 && x1==x2 && y1==y2) {
-                    //No big expensive op needed.
-                    for item in node.node_payload.iter_mut() {
-                        if item.get_key() == key {
-                            item.move_item(bb);
-                            return true;
-                        }
-                    }
-                    return true;
-                }
-            }
-            // This could be optimized slightly.
-            let item = self.remove(key);
-            if let Some(mut item) = item {
-                item.move_item(bb);
-                self.insert(item);
-                true
-            } else {
-                false
-            }
-        } else {
-            false
-        }
-    }
 
     /// Remove the given item.
     /// Return the item if it was found and removed,
