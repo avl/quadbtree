@@ -283,7 +283,7 @@ impl<T:TreeNodeItem + WithSchema + Serialize + Deserialize+Introspect> QuadBTree
     /// The smaller the size, the faster performance will be. However, by design, situations
     /// where many items would be expected to occupy the same 8x8 area should be avoided.
     pub fn new(size: i32) -> QuadBTree<T> {
-        let shift = (size as u32).log2();
+        let shift = (size as u32).ilog2();
         if 1<<shift != size {
             panic!("QuadBTree size must be a power of 2, not {}", size);
         }
