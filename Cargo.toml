@@ -9,7 +9,7 @@ debug = true
 
 [dependencies]
 smallvec="1.6"
-savefile = "0.10"
+savefile = "0.11"
 savefile-derive = "0.10"
 indexmap="1.6"
 [dev-dependencies]
