@@ -408,7 +408,6 @@ impl<T:TreeNodeItem + WithSchema + Serialize + Deserialize+Introspect> QuadBTree
         candidate_stack_b.extend(candidate_stack_ref_b.iter().copied().filter(|x|x.get_bb().overlaps(self_node.bb)));
 
 
-
         candidate_stack_a.extend(self_node.node_payload.iter());
 
         for cand in candidate_stack_a.iter().copied()
@@ -753,7 +752,7 @@ mod tests {
                 let x2 = rng.gen_range(x1..(x1.saturating_add(max_size)).min(gridsize));
                 let y2 = rng.gen_range(y1..(y1.saturating_add(max_size)).min(gridsize));
                 let pos = BB::new(x1,y1,x2,y2);
-                assert!(g.move_item(to_move_key,pos));
+                assert!(g.move_item(&TestItem{id:to_move_key,pos:pos}));
                 all_inserted[to_move_index].pos = pos;
             }
             if deletes_and_moves && rng.gen_bool(0.5) && all_inserted.is_empty()==false {
@@ -821,6 +820,7 @@ mod tests {
                 if overlaps.contains(&(item_a.id,item_b.id)) {
                     found_overlaps += 1;
                 }
+                //println!("Found overlaps: {}", found_overlaps);
                 assert_eq!(expected_overlaps, found_overlaps);
             }
         }
