@@ -1,11 +1,9 @@
 //! 2D non-balanced B-tree of bounded depth, for storing integer rectangles, and doing
 //! efficient searches through them.
-#![deny(warnings)]
 #![deny(missing_docs)]
-#![feature(int_log)]
 #![feature(stdsimd)]
-#![feature(bench_black_box)]
 #![feature(test)]
+#![feature(int_log)]
 
 #[macro_use]
 extern crate savefile_derive;
