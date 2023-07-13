@@ -19,7 +19,7 @@ use std::arch::x86_64::{__m128i, _mm_set1_epi8, _mm_cvtsi128_si64x, _mm_and_si12
 #[cfg(all(target_feature = "avx512vl", target_feature="avx512bw"))]
 use std::arch::x86_64::{_mm_broadcastb_epi8, _mm_maskz_broadcastb_epi8};
 use smallvec::SmallVec;
-use savefile::{WithSchema, Serialize, Deserialize, Introspect};
+use savefile::{WithSchema, Serialize, Deserialize, Introspect,ReprC};
 
 /// A coordinate point in the 2D world
 #[derive(Debug,Clone,Copy,PartialEq,Eq,Hash,Savefile)]
@@ -158,7 +158,7 @@ pub trait TreeNodeItem {
     /// The type of a unique key identifying a specific item.
     /// If you don't need this, you can use the BB as the key,
     /// or even Self.
-    type Key : PartialEq+Eq+Hash+WithSchema+Serialize+Deserialize+Introspect;
+    type Key : PartialEq+Eq+Hash+WithSchema+ReprC+Serialize+Deserialize+Introspect;
 
     /// Return bounding box for the given item
     fn get_bb(&self) -> BB;
@@ -177,7 +177,7 @@ fn get_set_bits_below(bitmap:u64, bit_index: u64) -> u32 {
 }
 
 #[derive(Savefile,Clone,Debug)]
-struct TreeNode<T:WithSchema + Serialize + Deserialize+Introspect> {
+struct TreeNode<T:WithSchema + Serialize + Deserialize+Introspect+ReprC> {
     bb: BB,
     sub_cell_size: i32,
     sub_cell_shift: u32,
@@ -212,14 +212,14 @@ struct TreeNode<T:WithSchema + Serialize + Deserialize+Introspect> {
 /// will have bad performance if the number of overlaps is too large (say more than
 /// a few on average per item).
 #[derive(Savefile,Clone,Debug)]
-pub struct QuadBTree<T:TreeNodeItem + WithSchema + Serialize + Deserialize+Introspect> {
+pub struct QuadBTree<T:TreeNodeItem + WithSchema+ReprC + Serialize + Deserialize+Introspect+ReprC> {
     /// Each position in this list is a node_index.
     tree: Vec<TreeNode<T>>, //The first position is always the root
     first_free: Option<u32>, //If there are free nodes, this is the first free node index.
     items: IndexMap<T::Key, u32>, //map item key to tree node
 }
 
-impl<T:TreeNodeItem + WithSchema + Serialize + Deserialize+Introspect + Clone> QuadBTree<T> {
+impl<T:TreeNodeItem + WithSchema + ReprC + Serialize + Deserialize+Introspect+ReprC + Clone> QuadBTree<T> {
     /// Returns true if an item with the given key was moved to the
     /// new bounding box location. False if item was not found.
     pub fn move_item(&mut self, item: &T) -> bool {
@@ -262,7 +262,7 @@ impl<T:TreeNodeItem + WithSchema + Serialize + Deserialize+Introspect + Clone> Q
 
 }
 
-impl<T:TreeNodeItem + WithSchema + Serialize + Deserialize+Introspect> QuadBTree<T> {
+impl<T:TreeNodeItem + WithSchema + ReprC + Serialize + Deserialize+Introspect+ReprC> QuadBTree<T> {
 
     /// Iterate over all elements in tree
     pub fn iter(&self) -> impl Iterator<Item=&T> {
@@ -701,11 +701,11 @@ mod tests {
     use std::collections::{HashSet};
     use test::Bencher;
     use std::hint::black_box;
-    use savefile::{WithSchema, Serialize, Deserialize, Introspect};
+    use savefile::{WithSchema, Serialize, Deserialize, Introspect,ReprC};
 
     extern crate test;
 
-    pub(crate) fn for_test_get_first_free<T:TreeNodeItem+WithSchema+Serialize+Deserialize+Introspect>(tree:&QuadBTree<T>) -> Option<u32> {
+    pub(crate) fn for_test_get_first_free<T:TreeNodeItem+WithSchema+Serialize+Deserialize+Introspect+ReprC>(tree:&QuadBTree<T>) -> Option<u32> {
         tree.first_free
     }
 
