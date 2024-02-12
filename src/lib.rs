@@ -1,7 +1,6 @@
 //! 2D non-balanced B-tree of bounded depth, for storing integer rectangles, and doing
 //! efficient searches through them.
 #![deny(missing_docs)]
-#![feature(stdsimd)]
 #![feature(test)]
 #![feature(int_log)]
 
